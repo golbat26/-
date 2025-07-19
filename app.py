@@ -130,18 +130,61 @@ class SettingsManager:
 # 1. モデル (Model)
 # =============================================================================
 class Transaction:
-    def __init__(self, amount: int, category: str, transaction_date: date, type: str):
+    def __init__(self, amount: int, category: str, transaction_date: date, type: str, id: str = None):
         if not isinstance(amount, int) or amount <= 0: raise ValueError("金額は正の整数で入力してください。")
         if not category or not category.strip(): raise ValueError("カテゴリは空にできません。")
         if not isinstance(transaction_date, date): raise ValueError("日付は有効な日付オブジェクトである必要があります。")
         if type not in ['income', 'expense']: raise ValueError("取引種別は 'income' または 'expense' である必要があります。")
+        
+        self.id = id if id is not None else str(uuid.uuid4())
         self.amount = amount; self.category = category.strip(); self.transaction_date = transaction_date; self.type = type
+        
     def to_card_data(self) -> dict:
         sign = "+" if self.type == 'income' else "-"; return {"date_str": f"{self.transaction_date.month}月{self.transaction_date.day}日", "category": self.category, "amount_str": f"{sign}¥{self.amount:,}", "type": self.type}
+    
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "amount": self.amount,
+            "category": self.category,
+            "transaction_date": self.transaction_date.isoformat(),
+            "type": self.type
+        }
+
+    @staticmethod
+    def from_dict(data: dict) -> 'Transaction':
+        return Transaction(
+            id=data["id"],
+            amount=data["amount"],
+            category=data["category"],
+            transaction_date=date.fromisoformat(data["transaction_date"]),
+            type=data["type"]
+        )
 
 class Ledger:
-    def __init__(self): self._transactions: List[Transaction] = []
-    def add_transaction(self, transaction: Transaction): self._transactions.append(transaction); self._transactions.sort(key=lambda x: x.transaction_date, reverse=True)
+    def __init__(self):
+        self.filepath = Path.home() / ".simple_kakeibo" / "transactions.json"
+        self.filepath.parent.mkdir(parents=True, exist_ok=True)
+        self._transactions: List[Transaction] = self._load()
+
+    def _load(self) -> List[Transaction]:
+        try:
+            with self.filepath.open('r', encoding='utf-8') as f:
+                raw_data = json.load(f)
+                return [Transaction.from_dict(item) for item in raw_data]
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+
+    def _save(self):
+        with self.filepath.open('w', encoding='utf-8') as f:
+            data_to_save = [tx.to_dict() for tx in self._transactions]
+            json.dump(data_to_save, f, indent=4, ensure_ascii=False)
+            
+    def add_transaction(self, transaction: Transaction):
+        self._transactions.append(transaction)
+        self._transactions.sort(key=lambda x: x.transaction_date, reverse=True)
+        self._save()
+
     def get_all_transactions(self) -> List[Transaction]: return self._transactions
     def get_expense_summary_for_month(self, year: int, month: int) -> int: return sum(tx.amount for tx in self._transactions if tx.transaction_date.year == year and tx.transaction_date.month == month and tx.type == 'expense')
     def get_income_summary_for_month(self, year: int, month: int) -> int: return sum(tx.amount for tx in self._transactions if tx.transaction_date.year == year and tx.transaction_date.month == month and tx.type == 'income')
@@ -156,8 +199,14 @@ class Ledger:
             if tx.transaction_date.year == year and tx.transaction_date.month == month and tx.type == 'income': category_summary[tx.category] += tx.amount
         return dict(sorted(category_summary.items(), key=lambda item: item[1], reverse=True))
     def get_transactions_for_day(self, target_date: date) -> List[Transaction]: return [tx for tx in self._transactions if tx.transaction_date == target_date]
+    
     def delete_transactions_for_day(self, target_date: date) -> int:
-        initial_count = len(self._transactions); self._transactions = [tx for tx in self._transactions if tx.transaction_date != target_date]; return initial_count - len(self._transactions)
+        initial_count = len(self._transactions)
+        self._transactions = [tx for tx in self._transactions if tx.transaction_date != target_date]
+        num_deleted = initial_count - len(self._transactions)
+        if num_deleted > 0:
+            self._save()
+        return num_deleted
 # =============================================================================
 
 # =============================================================================
@@ -209,12 +258,10 @@ PCCS_COLORS = [
     ("bP 青みの紫", "#645da9"), ("P 紫", "#884897"), ("rP 赤みの紫", "#a94395"),
     ("RP 赤紫", "#c5398a"), ("pRP 紫みの赤紫", "#d6327b"), ("R-P 赤紫（赤寄り）", "#d50065")
 ]
-# [ADDED] グレーのカラーパレットを追加
 GRAY_COLORS = [
     ("ライトグレー", "#cccccc"), ("グレー", "#9e9e9e"), ("ダークグレー", "#7f7f7f")
 ]
 
-# [MODIFIED] カラーピッカーにグレー選択肢を追加
 class PccsColorPickerDialog(tk.Toplevel):
     def __init__(self, parent, title, current_colors, on_select_callback):
         super().__init__(parent)
@@ -267,7 +314,6 @@ class PccsColorPickerDialog(tk.Toplevel):
             self.on_select_callback(selected_color_hex)
         self.destroy()
 
-# [MODIFIED] スクロール機能を追加
 class SettingsView(ttk.Frame):
     THEMES = {
         "デフォルト (ライトグレー)": "default_light_gray",
@@ -387,7 +433,6 @@ class SettingsView(ttk.Frame):
         if messagebox.askyesno("確認", f"{title_text}の色を全てデフォルトに戻しますか？", parent=self):
             self.settings_manager.reset_colors(type)
             
-            # 再描画処理の簡素化
             for child in self.scrollable_frame.winfo_children():
                 if isinstance(child, ttk.LabelFrame) and "グラフの色設定" in child.cget("text"):
                     for section in child.winfo_children():
@@ -558,7 +603,6 @@ class ChartView(ttk.Frame):
         sizes = list(data.values())
         if not sizes or sum(sizes) == 0: return
 
-        # ▼▼▼ 【実装】autopct=None に設定し、パーセンテージ表示を削除 ▼▼▼
         wedges, _ = self.ax.pie(sizes, autopct=None, startangle=90, counterclock=False, colors=colors, wedgeprops=dict(width=0.4, edgecolor='w'))
         
         text, color = "", "black"
@@ -649,14 +693,15 @@ class TodoView(ttk.Frame):
         else: self.add_todo_window.lift()
 
 class CalendarView(ttk.Frame):
-    # ▼▼▼▼▼ [FIXED] styleオブジェクトを受け取るように__init__を変更 ▼▼▼▼▼
     def __init__(self, parent, *, style: ttk.Style, ledger: Ledger, todo_manager: TodoManager, on_date_click_callback: Callable[[date], None], on_month_change_callback: Callable[[date], None], **kwargs):
         super().__init__(parent, **kwargs)
         self.style = style
         self.ledger = ledger
         self.todo_manager = todo_manager
         self.on_date_click_callback = on_date_click_callback; self.on_month_change_callback = on_month_change_callback
-        self.current_date = date.today(); self._font_measurer_label = ttk.Label(self); self._create_widgets(); self.render_calendar()
+        self.current_date = date.today(); self._font_measurer_label = ttk.Label(self); self._create_widgets()
+        # 【修正】初期化時の直接描画を削除。描画は親コンポーネントの準備ができてから呼び出される。
+        # self.render_calendar() 
     
     def _create_widgets(self):
         header_frame = ttk.Frame(self); header_frame.pack(fill=tk.X, pady=5, padx=5); header_frame.columnconfigure(1, weight=1)
@@ -682,6 +727,12 @@ class CalendarView(ttk.Frame):
         return "…", True
     
     def render_calendar(self):
+        # セルの横幅計算が、ウィジェットのサイズが確定してから行われるようにする
+        if self.calendar_grid.winfo_width() <= 1:
+            # まだサイズが確定していない場合は、少し待ってから再試行
+            self.after(50, self.render_calendar)
+            return
+
         for widget in self.calendar_grid.winfo_children(): widget.destroy()
         year, month = self.current_date.year, self.current_date.month; self.month_label.config(text=f"{year}年 {month}月")
         weekdays = ["日", "月", "火", "水", "木", "金", "土"]
@@ -697,7 +748,8 @@ class CalendarView(ttk.Frame):
             label = ttk.Label(d_label_frame, text=day_name, anchor="center", foreground=color, font=("", 9, "bold"), background=WEEKDAY_HEADER_BG)
             label.pack(expand=True, fill="both", ipady=2)
         
-        month_days = calendar.monthcalendar(year, month); self.calendar_grid.update_idletasks(); cell_width = self.calendar_grid.winfo_width() / 7 - 10
+        month_days = calendar.monthcalendar(year, month)
+        cell_width = self.calendar_grid.winfo_width() / 7 - 10
         for week_index, week in enumerate(month_days):
             for day_index, day in enumerate(week):
                 if day == 0: continue
@@ -708,12 +760,10 @@ class CalendarView(ttk.Frame):
                 content_frame = ttk.Frame(day_cell, style="Content.TFrame"); content_frame.grid(row=1, column=0, sticky="nsew")
 
                 date_canvas = tk.Canvas(header_frame, width=30, height=30, highlightthickness=0)
-                # ▼▼▼▼▼ [FIXED] エラーの発生源を修正。self.styleが使えるようになったため正常に動作する ▼▼▼▼▼
                 date_canvas.configure(bg=self.style.lookup("Content.TFrame", "background"))
                 date_canvas.pack(side=tk.LEFT, padx=4, pady=2)
                 
                 if date_obj == date.today():
-                    # ▼▼▼▼▼ [MODIFIED] 円の色をテーマから動的に取得するように変更 ▼▼▼▼▼
                     accent_color = self.style.lookup("Nav.TRadiobutton", "foreground", ("selected",))
                     date_canvas.create_oval(2, 2, 28, 28, outline=accent_color, width=2)
 
@@ -805,6 +855,13 @@ class HouseholdAppGUI:
         initial_theme = self.settings_manager.get("app_theme")
         self._apply_theme(initial_theme)
         
+        # 【修正】UIの初回更新を遅延させて呼び出す
+        # これにより、ウィンドウのサイズが確定した後に描画が実行され、文字の省略を防ぐ
+        self.root.after(50, self.initial_load)
+
+    # 【修正】初回読み込み用のメソッドを新設
+    def initial_load(self):
+        """UIの初回更新処理。ウィンドウサイズ確定後に呼び出す。"""
         self.update_ui()
         self._on_view_change()
 
@@ -895,7 +952,6 @@ class HouseholdAppGUI:
 
         right_pane = ttk.Frame(self.dashboard_frame)
         right_pane.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
-        # ▼▼▼▼▼ [FIXED] CalendarViewの生成時にstyleオブジェクトを渡す ▼▼▼▼▼
         self.calendar_view = CalendarView(right_pane, style=self.style, ledger=self.ledger, todo_manager=self.todo_manager, on_date_click_callback=self._on_date_selected_from_calendar, on_month_change_callback=self._on_calendar_month_changed)
         self.calendar_view.pack(fill=tk.BOTH, expand=True)
 
@@ -1169,9 +1225,6 @@ class HouseholdAppGUI:
 def main():
     my_ledger = Ledger()
     my_todo_manager = TodoManager()
-    try:
-        today = date.today()
-    except (ValueError, AttributeError) as e: messagebox.showerror("初期化エラー", f"サンプルデータの初期化中にエラーが発生しました: {e}")
     
     root = tk.Tk()
     
